@@ -32,7 +32,104 @@ server.on('upgrade', (req, socket) => {
     // Write the response back to the client socket, being sure to append two additional newlines so that the browser recognises the end of the response header and doesn't continue to wait for more header data: 
     socket.write(responseHeaders.join('\r\n') + '\r\n\r\n');
 
+    socket.on('data', buffer => {
+        const message = parseMessage(buffer);
+        if (message) {
+            console.log(message);
+            socket.write(constructReply({ message: 'Hello from the server.' }));
+        } else if (message === null) {
+            console.log('WebSocket connection closed by the client.');
+        }
+    });
 })
+
+function constructReply(data) {
+    const jsonData = JSON.stringify(data);
+    const jsonByteLength = Buffer.byteLength(jsonData);
+    // > 65535 byte payloads unsupported currently.
+    const lengthByteCount = jsonByteLength < 126 ? 0 : 2;
+    const payloadLength = lengthByteCount === 0 ? jsonByteLength : 126;
+    const buffer = Buffer.alloc(2 + lengthByteCount + jsonByteLength);
+    // Write out first bite adding opcode 1 to indicate that the payload contains text data.
+    buffer.writeUInt8(0b10000001, 0);
+    // Write the length of the JSON payload to the second byte
+    buffer.writeUInt8(payloadLength, 1);
+    let payloadOffset = 2;
+    if (lengthByteCount > 0) {
+        buffer.writeUInt16BE(jsonByteLength, 2);
+        payloadOffset += lengthByteCount;
+    }
+    // Write JSON data to the data buffer.
+    buffer.write(jsonData, payloadOffset);
+    return buffer;
+}
+
+function parseMessage(buffer) {
+    const firstByte = buffer.readUInt8(0);
+    const isFinalFrame = Boolean((firstByte >>> 7) & 0x1);
+    const [reserved1, reserved2, reserved3] = [
+        Boolean((firstByte >>> 6) & 0x1),
+        Boolean((firstByte >>> 5) & 0x1),
+        Boolean((firstByte >>> 4) & 0x1)
+    ];
+    const opCode = firstByte & 0xF;
+    // Check if opCode is 0x8 (close) and return null if so.
+    if (opCode === 0x8) {
+        return null;
+    }
+    // Currently only handling text frames (opCode 0x1).
+    if (opCode !== 0x1) {
+        return;
+    }
+    const secondByte = buffer.readUInt8(1);
+    const isMasked = Boolean((secondByte >>> 7) & 0x1);
+    // Keep track of position while advancing through buffer.
+    let currentOffset = 2;
+    let payloadLength = secondByte & 0x7F;
+    if (payloadLength > 125) {
+        if (payloadLength === 126) {
+            payloadLength = buffer.readUInt16BE(currentOffset);
+            currentOffset += 2;
+        } else {
+            // If either of these variables are defined, the frame size is huge.
+            const leftPart = buffer.readUInt32BE(currentOffset);
+            const rightPart = buffer.readUInt32BE(currentOffset += 4);
+            // Currently broken, throw error. Shouldn't need a frame this large.
+            throw new Error('Large payloads not currently implemented');
+        }
+    }
+    let maskingKey;
+    if (isMasked) {
+        maskingKey = buffer.readUInt32BE(currentOffset);
+        currentOffset += 4;
+        console.log('masking key:', maskingKey);
+    }
+    // allocate space for data.
+    const data = Buffer.alloc(payloadLength);
+    // if data was masked we loop through the source buffer one byte at a time performing a XOR comparison.
+    if (isMasked) {
+        console.log('masked');
+        let i, j;
+        for (i = 0, j = 0; i < payloadLength; ++i, j = i % 4) {
+            // Extract byte mask from masking key.
+            const shift = j === 3 ? 0 : (3 - j) << 3;
+            const mask = (shift === 0 ? maskingKey : (maskingKey >>> shift)) & 0xFF;
+            // Read byte from source buffer
+            const source = buffer.readUInt8(currentOffset++);
+            console.log('sourced data', source);
+            // XOR the source byte and write the result to data
+            data.writeUInt8(mask ^ source, i);
+            console.log('unmasked data', data);
+        }
+    } else {
+        console.log('not masked');
+        buffer.copy(data, 0, currentOffset++);
+    }
+    const jsonData = data.toString('utf8');
+    console.log('stringified data:', jsonData);
+    return JSON.parse(jsonData);
+
+}
 
 function generateAcceptValue(acceptKey) {
     return crypto
