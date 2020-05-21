@@ -1,7 +1,7 @@
 const http = require('http');
-const crypto = require('crypto');
 const static = require('node-static');
 const file = new static.Server('./');
+const { generateAcceptValue } = require('./utils');
 
 const server = http.createServer((req, res) => {
     req.addListener('end', () => file.serve(req, res)).resume();
@@ -34,9 +34,9 @@ server.on('upgrade', (req, socket) => {
 
     socket.on('data', buffer => {
         const message = parseMessage(buffer);
+        console.log(message);
         if (message) {
-            console.log(message);
-            socket.write(constructReply({ message: 'Hello from the server.' }));
+            socket.write(constructReply({ message: 'Hello from the server' }));
         } else if (message === null) {
             console.log('WebSocket connection closed by the client.');
         }
@@ -87,6 +87,7 @@ function parseMessage(buffer) {
     let currentOffset = 2;
     let payloadLength = secondByte & 0x7F;
     if (payloadLength > 125) {
+        console.log('long');
         if (payloadLength === 126) {
             payloadLength = buffer.readUInt16BE(currentOffset);
             currentOffset += 2;
@@ -102,13 +103,11 @@ function parseMessage(buffer) {
     if (isMasked) {
         maskingKey = buffer.readUInt32BE(currentOffset);
         currentOffset += 4;
-        console.log('masking key:', maskingKey);
     }
     // allocate space for data.
     const data = Buffer.alloc(payloadLength);
     // if data was masked we loop through the source buffer one byte at a time performing a XOR comparison.
     if (isMasked) {
-        console.log('masked');
         let i, j;
         for (i = 0, j = 0; i < payloadLength; ++i, j = i % 4) {
             // Extract byte mask from masking key.
@@ -116,30 +115,14 @@ function parseMessage(buffer) {
             const mask = (shift === 0 ? maskingKey : (maskingKey >>> shift)) & 0xFF;
             // Read byte from source buffer
             const source = buffer.readUInt8(currentOffset++);
-            console.log('sourced data', source);
             // XOR the source byte and write the result to data
             data.writeUInt8(mask ^ source, i);
-            console.log('unmasked data', data);
         }
     } else {
-        console.log('not masked');
         buffer.copy(data, 0, currentOffset++);
     }
     const jsonData = data.toString('utf8');
-    console.log('stringified data:', jsonData);
     return JSON.parse(jsonData);
-
 }
 
-function generateAcceptValue(acceptKey) {
-    return crypto
-        .createHash('sha1')
-        .update(acceptKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11', 'binary')
-        .digest('base64');
-}
-
-const PORT = process.env.PORT || 3210;
-
-server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+module.exports = server;
